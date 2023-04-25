@@ -1,0 +1,247 @@
+//https://github.com/rogerclarkmelbourne/Arduino_STM32/tree/master/STM32F1/libraries/USBComposite/examples
+#include <USBComposite.h>
+USBHID HID;
+HIDKeyboard Keyboard(HID);
+
+uint8_t diff = 8;
+int left_lst_value = 0;
+int right_lst_value = 0;
+int cur_left = 0;
+int cur_right = 0;
+struct {
+  bool actuation;
+  bool pressed;
+  uint8_t current;
+  uint8_t keycode;
+  uint8_t last_actuation;
+
+} keys[2];
+void setup() {
+  // Serial.begin(9600);
+  pinMode(PA1, INPUT_ANALOG);
+  pinMode(PA4, INPUT_ANALOG);
+  HID.begin(HID_KEYBOARD);
+  while (!USBComposite)
+    ;
+
+  delay(1500);
+  //diff=rmjitter();
+  left_lst_value = analogRead(PA1);
+  right_lst_value = analogRead(PA4);
+  keys[0].keycode = 'g';
+  keys[1].keycode = 'h';
+}
+
+
+int rmjitter() {
+  int max = 0;
+  int min = 99999;
+  int value = analogRead(PA3);
+
+  for (int i = 0; i < 10000; i++) {
+    value = analogRead(PA3);
+    if (value > max)
+      max = value = analogRead(PA4);
+    if (value < min)
+
+      min = analogRead(PA3);
+  }
+  return max - min;
+}
+
+uint8_t calcActuation(int input, int begin, int end, float segment_travel, int magnetic_turning_point) {
+  //按照wooting的划分方式 max_gear把键盘分成40个档位 对应4mm行程就是最低0.1mm 3mm行程的话就是0.075mm 数值越高越靠近磁性越好吧 精度越高 maybe
+  uint8_t max_gear = 255;
+  int result = 0;
+  int mid_gear = max_gear * segment_travel;
+  if (input > begin) return 0;
+  if (input < end) return max_gear;
+
+  if (input > magnetic_turning_point) {
+    //终止行程mid_gear
+    //磁铁终止行程begin-magnetic_turning_point
+    //行程input-magnetic_turning_point
+    //代数：67-(2600-2500)*67/374=18
+    result = mid_gear - ((input - magnetic_turning_point) * mid_gear) / (begin - magnetic_turning_point);
+  } else {
+    //终止行程mid_gear~max_gear
+    //磁铁终止行程begin-magnetic_turning_point
+    //行程input-magnetic_turning_point
+    //(0~max_gear-mid_gear)+mid_gear
+    //代数：100-(2000-1900)*33/600
+    int range = max_gear - mid_gear;
+    result = max_gear - ((input - end) * range / (magnetic_turning_point - end));
+  }
+  return result;
+}
+void calcAnalogLeft() {
+  cur_left = 0;
+  int temp_left = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    temp_left = analogRead(PA1);
+    int minus = temp_left - left_lst_value;
+    if (minus > 27 || minus < -27) {
+      //interrupt
+      cur_left = temp_left;
+      return;
+    }
+    cur_left += temp_left;
+  }
+  cur_left = cur_left / 4;
+}
+void calcAnalogRight() {
+
+  cur_right = 0;
+
+  int temp_right = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    temp_right = analogRead(PA4);
+    int minus = temp_right - right_lst_value;
+    if (minus > 27 || minus < -27) {
+      cur_right = temp_right;
+      return;
+    }
+    cur_right += temp_right;
+  }
+
+  cur_right = cur_right / 4;
+}
+
+//根据mrekk 0.4 down0.1 up0.2设置
+//0.4mm actuation=(256/40)*4 其他的相同方式计算
+uint8_t actuation_num = 105;
+int actuation_delay=0;
+uint8_t downstroke = 8;
+uint8_t upstroke = 20;
+uint8_t actuation_reset_point=16;//可以参考这个actuation_num - upstroke
+void keyLogic(uint8_t n) {
+
+  //是否actuation
+  if (!keys[n].actuation) {
+    if(keys[n].pressed)
+    actuation_reset(n);
+    if (keys[n].current >= actuation_num) {
+      delayMicroseconds(actuation_delay);//手感调节
+      pressKey(n);
+      keys[n].actuation = true;
+      keys[n].last_actuation = keys[n].current;
+    }
+  } else {
+    //更新last_actuation
+    //1.没触发的时候 释放更新
+    //2.触发的时候 下压更新
+    if ((keys[n].last_actuation < keys[n].current && keys[n].pressed == true) || (keys[n].last_actuation > keys[n].current && keys[n].pressed == false)) {
+      keys[n].last_actuation = keys[n].current;
+    }
+    //判断是否释放
+    if (keys[n].last_actuation > keys[n].current) {
+      if ((keys[n].last_actuation - keys[n].current > upstroke) && keys[n].pressed) {
+        releaseKey(n);
+        return;
+      }
+    }
+    //判断是否按下
+    if ((keys[n].last_actuation + downstroke <= keys[n].current) && !keys[n].pressed) {
+
+      pressKey(n);
+      return;
+    }
+    //重置actuation
+    if (keys[n].current < actuation_reset_point) {
+      actuation_reset(n);
+      return;
+    }
+  }
+}
+void actuation_reset(uint8_t n){
+        keys[n].actuation = false;
+      keys[n].last_actuation = 0;
+      releaseKey(n);
+}
+void pressKey(uint8_t n) {
+  Keyboard.press(keys[n].keycode);
+  keys[n].pressed = true;
+  debug(true);
+}
+
+void releaseKey(int n) {
+
+  Keyboard.release(keys[n].keycode);
+  keys[n].pressed = false;
+  debug(false);
+}
+void debug(bool status) {
+  //Serial.println(status);
+}
+//运行一轮要112us 扫描频率自己设置吧
+
+void loop() {
+
+  // unsigned long time=micros();
+
+  calcAnalogLeft();
+  int temp = left_lst_value - cur_left;
+
+  if (temp > diff || temp < -diff) {
+    left_lst_value = cur_left;
+    keys[0].current = calcActuation(cur_left, 2875, 1700, 0.83, 2200);
+
+    keyLogic(0);
+  }
+  delayMicroseconds(200);
+  calcAnalogRight();
+  temp = right_lst_value - cur_right;
+  if (temp > diff || temp < -diff) {
+    right_lst_value = cur_right;
+    keys[1].current = calcActuation(cur_right, 2925, 1885, 0.8, 2300);
+    keyLogic(1);
+  }
+  delayMicroseconds(200);
+  // time=micros()-time;
+  // Serial.print("Time: ");
+  // Serial.println(time);
+
+
+  // Serial.print(cur_left);
+  // Serial.print(",");
+  // Serial.println(cur_right);
+
+
+
+  
+}
+
+
+/*
+void loop() {
+  calcAnalogLeft();
+  calcAnalogRight();
+
+  int temp=left_lst_value-cur_left;
+  
+if(temp>diff||temp<-diff){
+  
+  left_lst_value=cur_left;
+ Serial.print(cur_left);
+
+Serial.print(",");
+Serial.print(calcActuation(cur_left,2863,1750,0.667,2450));
+Serial.print(",");
+
+
+Serial.print(cur_right);
+Serial.print(",");
+Serial.println(calcActuation(cur_right,2875,1600,0.56,2595));
+delay(2);
+return;
+}*/
+/*
+temp=right_lst_value-cur_right;
+if(temp>diff||temp<-diff){
+  right_lst_value=cur_right;
+Serial.print(calcActuation(cur_left,2863,1750,0.667,2450));
+Serial.print(",");
+Serial.println(calcActuation(cur_right,2875,1600,0.56,2595));
+delay(2);
+return;
+}*/
